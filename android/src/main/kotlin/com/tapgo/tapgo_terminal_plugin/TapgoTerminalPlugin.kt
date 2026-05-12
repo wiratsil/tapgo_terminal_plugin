@@ -199,13 +199,11 @@ class TapgoTerminalPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Even
             }
 
             "startQr" -> {
-                startQrScan()
-                result.success(commandResult(true, true, "Starting QR scanner..."))
+                result.success(startQrScan())
             }
 
             "stopQr" -> {
-                stopQrScan()
-                result.success(commandResult(true, true, "QR scanner stopped."))
+                result.success(stopQrScan())
             }
 
             "showGreenLed" -> {
@@ -685,50 +683,112 @@ class TapgoTerminalPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Even
         }
     }
 
-    private fun startQrScan() {
+    private fun startQrScan(): Map<String, Any?> {
         if (qrSessionActive) {
-            return
+            val message = "QR scanner already active."
+            emitQrStatus(message)
+            return commandResult(
+                success = true,
+                implemented = true,
+                message = message,
+                data = buildQrCommandData(status = "ACTIVE"),
+            )
         }
         emitQrStatus("Preparing QR scanner...")
         val powerResult = runCatching { powerControl.decodePower(1) }.getOrElse {
-            emitQrStatus("QR power on error: ${it.message}")
+            val message = "QR power on error: ${it.message}"
+            emitQrStatus(message)
             resetLedState()
             qrSessionActive = false
             scheduleQrRetry()
-            return
+            return commandResult(
+                success = true,
+                implemented = true,
+                message = message,
+                data = buildQrCommandData(
+                    status = "RETRYING",
+                    retryScheduled = true,
+                ),
+            )
         }
         if (powerResult != ResultCode.SUCCESS) {
             if (powerResult == 61447 || powerResult == -4089) {
-                emitQrStatus("QR Hardware Error ($powerResult). Stopping.")
+                val message = "QR hardware error ($powerResult)."
+                emitQrStatus("$message Stopping.")
                 resetLedState()
                 qrSessionActive = false
-                return
+                return commandResult(
+                    success = false,
+                    implemented = true,
+                    message = message,
+                    data = buildQrCommandData(
+                        status = "HARDWARE_ERROR",
+                        powerCode = powerResult,
+                    ),
+                )
             }
-            emitQrStatus("QR power on failed (code $powerResult). Retrying...")
+            val message = "QR power on failed (code $powerResult)."
+            emitQrStatus("$message Retrying...")
             resetLedState()
             qrSessionActive = false
             scheduleQrRetry()
-            return
+            return commandResult(
+                success = true,
+                implemented = true,
+                message = message,
+                data = buildQrCommandData(
+                    status = "RETRYING",
+                    powerCode = powerResult,
+                    retryScheduled = true,
+                ),
+            )
         }
 
         val openResult = runCatching { decodeReader.open(QR_BAUD_RATE) }.getOrElse {
-            emitQrStatus("QR reader open error: ${it.message}")
+            val message = "QR reader open error: ${it.message}"
+            emitQrStatus(message)
             resetLedState()
             qrSessionActive = false
             scheduleQrRetry()
-            return
+            return commandResult(
+                success = true,
+                implemented = true,
+                message = message,
+                data = buildQrCommandData(
+                    status = "RETRYING",
+                    retryScheduled = true,
+                ),
+            )
         }
 
         if (openResult == ResultCode.SUCCESS) {
             qrSessionActive = true
             decodeReader.setDecodeReaderListener(decodeListener)
-            emitQrStatus("QR scanner ready. Waiting for code...")
+            val message = "QR scanner ready. Waiting for code..."
+            emitQrStatus(message)
             scanHandler.post(scanRunnable)
+            return commandResult(
+                success = true,
+                implemented = true,
+                message = message,
+                data = buildQrCommandData(status = "READY"),
+            )
         } else {
-            emitQrStatus("Failed to open QR reader (code $openResult). Retrying...")
+            val message = "Failed to open QR reader (code $openResult)."
+            emitQrStatus("$message Retrying...")
             resetLedState()
             qrSessionActive = false
             scheduleQrRetry()
+            return commandResult(
+                success = true,
+                implemented = true,
+                message = message,
+                data = buildQrCommandData(
+                    status = "RETRYING",
+                    openCode = openResult,
+                    retryScheduled = true,
+                ),
+            )
         }
     }
 
@@ -737,12 +797,43 @@ class TapgoTerminalPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Even
         scanHandler.postDelayed({ startQrScan() }, QR_RETRY_DELAY_MS)
     }
 
-    private fun stopQrScan() {
+    private fun stopQrScan(): Map<String, Any?> {
+        val wasActive = qrSessionActive
         qrSessionActive = false
         scanHandler.removeCallbacksAndMessages(null)
         runCatching { decodeReader.close() }
         runCatching { powerControl.decodePower(0) }
         resetLedState()
+        val message = if (wasActive) {
+            "QR scanner stopped."
+        } else {
+            "QR scanner was not active."
+        }
+        emitQrStatus(message)
+        return commandResult(
+            success = true,
+            implemented = true,
+            message = message,
+            data = buildQrCommandData(status = "STOPPED"),
+        )
+    }
+
+    private fun buildQrCommandData(
+        status: String,
+        powerCode: Int? = null,
+        openCode: Int? = null,
+        retryScheduled: Boolean = false,
+    ): Map<String, Any?> {
+        return buildMap<String, Any?> {
+            put("status", status)
+            put("sessionActive", qrSessionActive)
+            put("retryScheduled", retryScheduled)
+            put("readerReady", readerReady)
+            put("vendorReaderServiceInstalled", isPackageInstalled("com.reader.service"))
+            put("hasCameraFeature", applicationContext.packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY))
+            powerCode?.let { put("powerCode", it) }
+            openCode?.let { put("openCode", it) }
+        }
     }
 
     private fun handlePosCallback(data: Hashtable<String, String>) {
